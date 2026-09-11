@@ -663,8 +663,18 @@ def format_prompt(
                 tokenize=False,
                 add_generation_prompt=True,
             )
-        except Exception:  # noqa: BLE001 - templates vary across local models.
-            pass
+        except Exception as exc:  # noqa: BLE001 - templates vary across models.
+            # Never silently: the fallback writes a literal "<image>" that a
+            # Qwen-style processor does not recognise, so the images are still
+            # handed to the processor with nothing in the text to bind them to.
+            # That either errors out or -- worse -- evaluates a model that never
+            # saw the render, and scores it anyway.
+            warn_once(
+                "chat template failed, falling back to plain text "
+                f"({type(exc).__name__}: {exc}). With images in the prompt this "
+                "usually means the model is not actually seeing them -- check "
+                "the processor before trusting these scores."
+            )
     return fallback_prompt_text(system, user_text)
 
 
