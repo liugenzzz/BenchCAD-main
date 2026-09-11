@@ -1,0 +1,13 @@
+python tools/sample_custom_jsonl.py /app/cad_program/conversion_pipeline/generated/sharegpt_qwen3_vl_8b.jsonl /app/cad_program/three_cad_task_type_code/sharegpt_cad_codegen.jsonl \
+  --count 400 \
+  --seed 42 \
+  --image-prefix-from /trainspace \
+  --image-prefix-to /app/llamafactory/trainspace \
+  --remove-from-input
+  
+python tools/sample_custom_jsonl.py /app/cad_program/conversion_pipeline/generated/sharegpt_qwen3_vl_8b.jsonl /app/cad_program/three_cad_task_type_code/sharegpt_cad_codegen.jsonl \
+  --count 146647 \
+  --seed 42 \
+  --image-prefix-from /trainspace \
+  --image-prefix-to /app/llamafactory/trainspace \
+   --resume

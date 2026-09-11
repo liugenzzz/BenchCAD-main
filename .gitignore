@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# venv / uv
+.venv/
+venv/
+
+# Secrets — never commit API keys
+.env
+*.env
+!.env.example
+
+# Benchmark data pulled from HuggingFace (test_data/ IS committed, data/ is not)
+data/
+*/data/
+
+# Run outputs (STEP/PNG artifacts live under these; committed test_data/ is not ignored)
+results/
+*/results/
+*/results_*/
+
+# Prime Intellect env push state (per-machine, regenerated on push)
+.prime/
+**/dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,58 @@
+cff-version: 1.2.0
+title: "BenchCAD: A Comprehensive, Industry-Standard Benchmark for Programmatic CAD"
+message: "If you use BenchCAD, please cite it using these metadata."
+type: dataset
+authors:
+  - given-names: Haozhe
+    family-names: Zhang
+  - given-names: Kaichen
+    family-names: Liu
+  - given-names: Miaomiao
+    family-names: Chen
+  - given-names: Lei
+    family-names: Li
+  - given-names: Shaojie
+    family-names: Yang
+  - given-names: Cheng
+    family-names: Peng
+  - given-names: Hanjie
+    family-names: Chen
+repository-code: "https://github.com/BenchCAD/BenchCAD-main"
+url: "https://huggingface.co/datasets/BenchCAD/BenchCAD"
+abstract: >-
+  BenchCAD is a suite of three benchmarks (Vision2Code, CodeEdit, QA) that
+  evaluate large language and multimodal models on procedural 3D CAD code
+  understanding and generation. Tasks are graded by execution-grounded,
+  objective metrics (voxel IoU between STEP solids; symmetric ratio accuracy on
+  numeric answers) with no LLM judge in the loop.
+keywords:
+  - benchmark
+  - CAD
+  - CadQuery
+  - code generation
+  - multimodal
+  - large language models
+license: MIT
+version: 0.1.0
+date-released: "2026-06-24"
+preferred-citation:
+  type: article
+  title: "BenchCAD: A Comprehensive, Industry-Standard Benchmark for Programmatic CAD"
+  authors:
+    - given-names: Haozhe
+      family-names: Zhang
+    - given-names: Kaichen
+      family-names: Liu
+    - given-names: Miaomiao
+      family-names: Chen
+    - given-names: Lei
+      family-names: Li
+    - given-names: Shaojie
+      family-names: Yang
+    - given-names: Cheng
+      family-names: Peng
+    - given-names: Hanjie
+      family-names: Chen
+  year: 2026
+  eprint: "2605.10865"
+  repository: "https://arxiv.org/abs/2605.10865"

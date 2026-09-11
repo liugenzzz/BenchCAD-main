@@ -1,0 +1,144 @@
+<div align="center">
+
+<img src="assets/benchcad-icon.svg" alt="BenchCAD" width="90" />
+
+# BenchCAD
+
+**A benchmark for evaluating LLMs and multimodal models on programmatic CAD.**
+
+[![Website](https://img.shields.io/badge/🌐%20Website-benchcad.com-2ea44f.svg)](https://benchcad.com)
+[![Leaderboard](https://img.shields.io/badge/🏆%20Leaderboard-view-orange.svg)](LEADERBOARD.md)
+[![Paper](https://img.shields.io/badge/arXiv-2605.10865-b31b1b.svg)](https://arxiv.org/abs/2605.10865)
+[![Dataset](https://img.shields.io/badge/🤗%20HuggingFace-BenchCAD-yellow.svg)](https://huggingface.co/datasets/BenchCAD/BenchCAD)
+[![Code License: MIT](https://img.shields.io/badge/Code-MIT-blue.svg)](LICENSE)
+[![Data License: CC BY 4.0](https://img.shields.io/badge/Data-CC--BY--4.0-blue.svg)](https://creativecommons.org/licenses/by/4.0/)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
+
+[Website](https://benchcad.com) · [Leaderboard](LEADERBOARD.md) · [Paper](https://arxiv.org/abs/2605.10865) · [Dataset](https://huggingface.co/datasets/BenchCAD/BenchCAD) · [Contributing](CONTRIBUTING.md)
+
+</div>
+
+---
+
+BenchCAD evaluates whether a model can *understand and write parametric CAD code*
+— the [CadQuery](https://github.com/CadQuery/cadquery) programs that generate real
+mechanical parts. It is built on **17,900 execution-verified CadQuery programs**
+across **106 industrial part families** (bevel gears, compression springs, twist
+drills, threaded adapters, …) drawn from **47 engineering standards** (ISO / DIN / EN /
+ASME / IEC). The benchmark decomposes model ability into four tasks (across three task
+dirs — QA splits into a vision and a code variant) spanning perception,
+parametric abstraction, and executable synthesis.
+
+> **Scoring is execution-grounded and deterministic — there is no LLM judge.**
+> Generation tasks grade by *voxel IoU* between the model's executed STEP solid and
+> the ground-truth STEP; the QA task grades by *symmetric ratio accuracy* on numeric
+> answers. Every score is reproducible by re-running the scorer, never model-judged.
+
+## Tasks
+
+| Task | Input → Output | Metric |
+|---|---|---|
+| **Vision2Code** (`Vision2Code/`) | rendered views of a part → a CadQuery program | voxel IoU vs ground-truth STEP |
+| **CodeEdit** (`CodeEdit/`) | instruction (+ part) → edit an existing CadQuery program | normalized IoU (improvement over baseline) |
+| **Vision-QA** (`QA/`, `mode: img`) | rendered views + a numeric question → a number | symmetric ratio accuracy |
+| **Code-QA** (`QA/`, `mode: code`) | CadQuery code + a numeric question → a number | symmetric ratio accuracy |
+
+## Why BenchCAD
+
+- **Objective, execution-grounded labels.** Ground truth is real geometry; scores
+  come from a CAD kernel, not an LLM judge or human vote — they can't be gamed by
+  fluent-but-wrong outputs.
+- **Multimodal.** Tasks probe code-only, vision-only, and combined reasoning.
+- **Industry-standard parts.** Real mechanical families and standards, not toy primitives.
+- **Reproducible.** Pinned environment, one-command runs, deterministic scoring.
+
+## Installation
+
+```bash
+# Python 3.11, managed by uv (https://docs.astral.sh/uv/)
+uv sync
+
+# LLM API keys only — benchmark data is public
+cp .env.example .env   # then paste OPENAI / ANTHROPIC / GEMINI / OPENROUTER keys
+```
+
+## Quick start
+
+After `uv sync` and pasting a key into `.env`, one command runs everything —
+data is pulled from HuggingFace on demand, nothing to download by hand:
+
+```bash
+# Quick smoke: all three tasks, 5 records each
+uv run python benchcad.py --model gpt-4o
+
+# The full benchmark: all three tasks, full split
+uv run python benchcad.py --task all --num all --model gpt-4o
+
+# One task, 100 records, reproducible random sample
+uv run python benchcad.py --task vision2code --num 100 --model claude-opus-4-7 --seed 42
+
+# Several models at once; composite (fused) scoring for Vision2Code
+uv run python benchcad.py --num all --model gpt-4o gemini-3-pro-preview --score composite
+```
+
+| Flag | Meaning |
+|---|---|
+| `--task` | `all` (default) / `vision2code` / `codeedit` / `qa` |
+| `--num` | `all`, or a number of records per task (default `5`, a smoke) |
+| `--model` | one or more model names (**required**) |
+| `--seed` | reproducible random `--num N` sample |
+| `--score` | Vision2Code scoring: `iou` (default) or `composite` |
+
+Each task is also runnable on its own with finer control
+(`cd Vision2Code && uv run python main.py --config configs/prod.yaml --model gpt-4o`);
+see the per-task READMEs.
+
+## Dataset
+
+Hosted on HuggingFace at [`BenchCAD/BenchCAD`](https://huggingface.co/datasets/BenchCAD/BenchCAD)
+and pulled into the gitignored `data/` folder on first `prod` run. One config per task:
+
+| Task | Config | Size | Contents |
+|---|---|---|---|
+| Vision2Code | `code_gen` | 17,900 | GT CadQuery code + 4 rendered views per part (106 families) |
+| CodeEdit | `edit-bench` | 748 | instruction-guided edit benchmark |
+| Vision-QA / Code-QA | `QA` | 2,400 | numeric questions over 200 parts (dimensions, counts, ratios); asked from the rendered image (`mode: img`) or the CadQuery code (`mode: code`) |
+
+A tiny `test_data/` (≈4 records) is committed per task for smoke tests without any
+download. Dataset schema and column details are documented on the dataset card.
+
+## Repository layout
+
+```
+BenchCAD/
+├── benchcad.py             one-click runner (--task / --num / --model)
+├── pyproject.toml          shared, pinned environment
+├── Vision2Code/  CodeEdit/  QA/    three task dirs — QA serves Vision-QA + Code-QA (mode: img / code)
+├── tools/                  regrade / validate_task / validate_family / ingest_to_hf
+└── contributions/          community-submitted parts (see CONTRIBUTING.md)
+```
+
+Each task subdir shares the same shape: `main.py`, `configs/{test,prod}.yaml`,
+`pipeline/`, `scoring/`, `models/`, `test_data/`, `tools/download_*.py`, `README.md`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). You can contribute a new part/QA item, a
+model's results (we re-grade raw predictions — numbers are never self-reported), or
+code / errata fixes.
+
+## Citation
+
+```bibtex
+@article{zhang2026benchcad,
+  title   = {BenchCAD: A Comprehensive, Industry-Standard Benchmark for Programmatic CAD},
+  author  = {Zhang, Haozhe and Liu, Kaichen and Chen, Miaomiao and Li, Lei and Yang, Shaojie and Peng, Cheng and Chen, Hanjie},
+  journal = {arXiv preprint arXiv:2605.10865},
+  year    = {2026}
+}
+```
+
+## License
+
+Code is released under the [MIT License](LICENSE); the dataset is released under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
