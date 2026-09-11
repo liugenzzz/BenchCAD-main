@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,20 @@ def _patch_export(code: str, out_step: Path) -> str:
     return _OCP_HASHCODE_FIX + "\n" + patched
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill a timed-out child and everything it spawned."""
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def execute_cq_to_step(code: str, step_path: Path, timeout: int = 300) -> None:
     """Execute `code` so `result` is exported to `step_path`. Raises on failure."""
     step_path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,22 +86,38 @@ def execute_cq_to_step(code: str, step_path: Path, timeout: int = 300) -> None:
     ) as f:
         f.write(patched)
         tmp = f.name
+    # Its own session, so a timeout can kill the whole process tree. OCC spawns
+    # helper threads/processes that inherit the pipes; killing only the direct
+    # child leaves them holding stdout open and communicate() then blocks
+    # forever -- the timeout above would never actually fire.
+    popen_kwargs = {}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
     try:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, tmp],
             env=os.environ.copy(),
-            timeout=timeout,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **popen_kwargs,
         )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"timeout after {timeout}s") from e
+        try:
+            _, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            _kill_tree(proc)
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass  # Orphan holding the pipe: the tree is dead, stop waiting.
+            raise RuntimeError(f"timeout after {timeout}s") from e
+        returncode = proc.returncode
     finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-    if r.returncode != 0:
-        err = r.stderr.decode(errors="replace").strip().splitlines()[-1:] or ["unknown subprocess error"]
+    if returncode != 0:
+        err = stderr.decode(errors="replace").strip().splitlines()[-1:] or ["unknown subprocess error"]
         raise RuntimeError(err[0][:300])
     if not step_path.exists():
         raise RuntimeError("subprocess succeeded but no STEP file written")

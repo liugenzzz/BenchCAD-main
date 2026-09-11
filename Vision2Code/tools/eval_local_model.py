@@ -391,12 +391,64 @@ def ensure_result_binding(code: str) -> str:
     return code
 
 
+def record_image_paths(record: dict[str, Any], data_dir: Path) -> list[Path] | None:
+    """Prompt images a record declares, or None when they are rendered lazily.
+
+    Mirrors the resolution order in pipeline/prompt.py:build without rendering
+    anything, so a preflight can check for missing files cheaply.
+    """
+    def resolve(value: str | Path) -> Path:
+        path = Path(value)
+        return path if path.is_absolute() else data_dir / path
+
+    image_values = record.get("images") or []
+    if isinstance(image_values, (str, Path)):
+        image_values = [image_values]
+    if image_values:
+        return [resolve(value) for value in image_values]
+    if record.get("composite_png"):
+        return [resolve(record["composite_png"])]
+    views = [
+        resolve(record[f"view_{index}_png"])
+        for index in range(4)
+        if record.get(f"view_{index}_png")
+    ]
+    return views or None
+
+
+def missing_image_paths(record: dict[str, Any], data_dir: Path) -> list[Path]:
+    """Declared prompt images that are not on disk."""
+    declared = record_image_paths(record, data_dir)
+    if not declared:
+        return []
+    return [path for path in declared if not path.is_file()]
+
+
+def preflight_images(
+    records: list[dict[str, Any]],
+    data_dir: Path,
+) -> list[tuple[str, Path]]:
+    """Report records whose prompt images are missing, before any model loads.
+
+    A missing image raises inside generate() and is otherwise indistinguishable
+    from a model failure -- and with --resume it gets checkpointed as one. Far
+    better to say so up front than to spend a GPU-hour writing 400 identical
+    FileNotFoundErrors.
+    """
+    missing: list[tuple[str, Path]] = []
+    for record in records:
+        for path in missing_image_paths(record, data_dir):
+            missing.append((record["record_id"], path))
+    return missing
+
+
 def ground_truth_step_for_record(
     record: dict[str, Any],
     *,
     data_dir: Path,
     results_root: Path,
     exec_timeout: int,
+    cache_root: Path | None = None,
 ) -> Path:
     """Resolve a supplied GT STEP or build and cache one from ShareGPT GT code."""
     step_path = record.get("step_path")
@@ -419,7 +471,9 @@ def ground_truth_step_for_record(
 
     digest = hashlib.sha256(gt_code.encode("utf-8")).hexdigest()[:12]
     safe_record_id = safe_model_name(str(record["record_id"]))
-    cached_step = results_root / "ground_truth_steps" / f"{safe_record_id}_{digest}.step"
+    cached_step = (
+        (cache_root or results_root) / "ground_truth_steps" / f"{safe_record_id}_{digest}.step"
+    )
     if not cached_step.is_file():
         execute_cq_to_step(code, cached_step, timeout=exec_timeout)
     return cached_step
@@ -721,6 +775,8 @@ def run_record(
     score: str,
     exec_timeout: int,
     render_png: bool = True,
+    iou_timeout: float | None = None,
+    gt_cache_root: Path | None = None,
 ) -> dict[str, Any]:
     """Run and score one local-model Vision2Code record."""
     from benchcad_core.scoring.exec_cq import execute_cq_to_step, extract_code
@@ -729,32 +785,61 @@ def run_record(
 
     record_id = record["record_id"]
     paths = output_paths(results_root, model_name, record_id)
-    gt_step = ground_truth_step_for_record(
-        record,
-        data_dir=data_dir,
-        results_root=results_root,
-        exec_timeout=exec_timeout,
-    )
-    system, user_text, image_paths = build_prompt(record, data_dir)
+
+    # Everything before generation gets its own status instead of crashing the
+    # whole run or masquerading as a model failure: one unbuildable ground
+    # truth used to take all remaining records down with it.
+    blocked: tuple[str, str] | None = None
+    gt_step: Path | None = None
+    try:
+        gt_step = ground_truth_step_for_record(
+            record,
+            data_dir=data_dir,
+            results_root=results_root,
+            exec_timeout=exec_timeout,
+            cache_root=gt_cache_root,
+        )
+    except Exception as exc:  # noqa: BLE001 - one bad GT must not end the run.
+        blocked = ("gt_fail", f"{type(exc).__name__}: {exc}")
+
+    system = user_text = ""
+    image_paths: list[Path] = []
+    if blocked is None:
+        try:
+            system, user_text, image_paths = build_prompt(record, data_dir)
+            missing = missing_image_paths(record, data_dir)
+            if missing:
+                blocked = (
+                    "missing_image",
+                    "prompt image not found: "
+                    + ", ".join(str(path) for path in missing[:3]),
+                )
+        except Exception as exc:  # noqa: BLE001 - bad record, not a bad model.
+            blocked = ("prompt_fail", f"{type(exc).__name__}: {exc}")
 
     usage: dict[str, int | None] = {}
-    start = time.time()
-    try:
-        raw, usage = local_model.generate(
-            system=system,
-            user_text=user_text,
-            image_paths=image_paths,
-        )
-        model_error = None
-    except Exception as exc:  # noqa: BLE001 - keep benchmark running.
-        raw = ""
-        model_error = f"{type(exc).__name__}: {exc}"
-    latency = time.time() - start
+    raw = ""
+    model_error = None
+    latency = 0.0
+    if blocked is None:
+        start = time.time()
+        try:
+            raw, usage = local_model.generate(
+                system=system,
+                user_text=user_text,
+                image_paths=image_paths,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep benchmark running.
+            raw = ""
+            model_error = f"{type(exc).__name__}: {exc}"
+        latency = time.time() - start
 
     code = ensure_result_binding(extract_code(raw)) if raw else ""
     paths["raw"].write_text(raw or "", encoding="utf-8")
     paths["code"].write_text(code or raw or "", encoding="utf-8")
-    if model_error:
+    if blocked is not None:
+        status, err_msg = blocked
+    elif model_error:
         status = "model_fail"
         err_msg = model_error
     elif not code.strip():
@@ -782,6 +867,7 @@ def run_record(
             iou = iou_step_vs_step(
                 paths["step"],
                 gt_step,
+                timeout=iou_timeout,
             )
         except Exception as exc:  # noqa: BLE001 - failed scoring scores zero.
             iou = 0.0
@@ -979,6 +1065,42 @@ def parse_args() -> argparse.Namespace:
             "where VTK has no display."
         ),
     )
+    parser.add_argument(
+        "--iou-timeout",
+        type=float,
+        default=120.0,
+        help=(
+            "Wall-clock budget for scoring one pair of STEPs (default: 120). "
+            "Voxelizing a dense or non-watertight mesh can run for hours; "
+            "exceeding this scores the record score_fail instead of hanging "
+            "the run. 0 disables the limit."
+        ),
+    )
+    parser.add_argument(
+        "--gt-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Where to cache ground-truth STEPs built from GT code "
+            "(default: <out-dir>/ground_truth_steps). Point it outside --out-dir "
+            "so deleting results does not throw the cache away too."
+        ),
+    )
+    parser.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=25,
+        help=(
+            "Abort after this many records fail in a row (default: 25, 0 to "
+            "disable). A dead CUDA context or a wrong data dir fails every "
+            "remaining record; stopping early keeps --resume checkpoints clean."
+        ),
+    )
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Do not check prompt images before loading the model.",
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--do-sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.2)
@@ -1046,6 +1168,27 @@ def main() -> None:
         print_summary(out_dir)
         return
 
+    if not args.skip_preflight:
+        missing = preflight_images(records, data_dir)
+        if missing:
+            print(
+                f"\npreflight: {len(missing)} prompt image(s) missing for "
+                f"{len({record_id for record_id, _ in missing})}/{len(records)} record(s)",
+                file=sys.stderr,
+            )
+            for record_id, path in missing[:5]:
+                print(f"  {record_id}: {path}", file=sys.stderr)
+            if len({record_id for record_id, _ in missing}) == len(records):
+                raise SystemExit(
+                    "preflight: every record is missing its prompt image. Check "
+                    "--data-file / --data-dir before spending a GPU on this."
+                )
+            print(
+                "preflight: those records will be recorded as missing_image; "
+                "pass --skip-preflight to silence this check.",
+                file=sys.stderr,
+            )
+
     local_model = LocalVisionLanguageModel(
         model_path,
         device=args.device,
@@ -1057,6 +1200,8 @@ def main() -> None:
         temperature=args.temperature,
     )
 
+    gt_cache_root = resolve_path(args.gt_cache_dir) if args.gt_cache_dir else None
+    consecutive_failures = 0
     for index, record in enumerate(records, 1):
         print(
             f"  [{model_name}] {index}/{len(records)} {record['record_id']}",
@@ -1072,8 +1217,25 @@ def main() -> None:
             score=args.score,
             exec_timeout=args.exec_timeout,
             render_png=not args.no_png,
+            iou_timeout=args.iou_timeout or None,
+            gt_cache_root=gt_cache_root,
         )
         print(f"{row['status']:10s} {row['score_type']}={row['score']:.3f}")
+        if row["status"] == "ok":
+            consecutive_failures = 0
+            continue
+        consecutive_failures += 1
+        if (
+            args.max_consecutive_failures
+            and consecutive_failures >= args.max_consecutive_failures
+        ):
+            print(
+                f"\nabort: {consecutive_failures} record(s) failed in a row; "
+                f"last error on {record['record_id']}: {row['err']}\n"
+                "Fix the cause and re-run with --resume --rerun-failed.",
+                file=sys.stderr,
+            )
+            break
     print_summary(out_dir)
 
 
