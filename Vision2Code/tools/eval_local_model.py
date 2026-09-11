@@ -327,6 +327,17 @@ def safe_model_name(model_name: str) -> str:
     )
 
 
+_WARNED: set[str] = set()
+
+
+def warn_once(message: str) -> None:
+    """Print a warning the first time it happens, then stay quiet."""
+    if message in _WARNED:
+        return
+    _WARNED.add(message)
+    print(f"\n[warn] {message}", file=sys.stderr, flush=True)
+
+
 def output_paths(results_root: Path, model_name: str, record_id: str) -> dict[str, Path]:
     """Create and return per-record output paths."""
     base = results_root / "outputs" / safe_model_name(model_name)
@@ -709,6 +720,7 @@ def run_record(
     local_model: LocalVisionLanguageModel,
     score: str,
     exec_timeout: int,
+    render_png: bool = True,
 ) -> dict[str, Any]:
     """Run and score one local-model Vision2Code record."""
     from benchcad_core.scoring.exec_cq import execute_cq_to_step, extract_code
@@ -801,13 +813,13 @@ def run_record(
             status = "score_fail"
             err_msg = f"composite_fail: {type(exc).__name__}: {exc}"
 
-    if status == "ok" and paths["step"].exists():
+    if render_png and status == "ok" and paths["step"].exists():
         try:
             from benchcad_core.scoring.views import composite_for_step
 
             composite_for_step(paths["step"], paths["png"])
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - previews never fail a row.
+            warn_once(f"PNG preview disabled: {type(exc).__name__}: {exc}")
 
     row = {
         "record_id": record_id,
@@ -958,6 +970,15 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "float16", "bfloat16", "float32"],
         default="auto",
     )
+    parser.add_argument(
+        "--no-png",
+        action="store_true",
+        help=(
+            "Skip the 4-view PNG preview of generated STEPs. The preview is "
+            "cosmetic; scoring never uses it. Useful on headless machines "
+            "where VTK has no display."
+        ),
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--do-sample", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.2)
@@ -1037,7 +1058,11 @@ def main() -> None:
     )
 
     for index, record in enumerate(records, 1):
-        print(f"  [{model_name}] {index}/{len(records)} {record['record_id']}", end=" ... ")
+        print(
+            f"  [{model_name}] {index}/{len(records)} {record['record_id']}",
+            end=" ... ",
+            flush=True,
+        )
         row = run_record(
             record=record,
             data_dir=data_dir,
@@ -1046,6 +1071,7 @@ def main() -> None:
             local_model=local_model,
             score=args.score,
             exec_timeout=args.exec_timeout,
+            render_png=not args.no_png,
         )
         print(f"{row['status']:10s} {row['score_type']}={row['score']:.3f}")
     print_summary(out_dir)

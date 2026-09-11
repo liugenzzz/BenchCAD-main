@@ -12,6 +12,7 @@ PNG already exists and is newer than the STEP, no re-render.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -66,6 +67,32 @@ def _step_to_normalized_mesh(step_path: Path):
     return verts, tris
 
 
+def _offscreen_render_window(vtk):
+    """Return a render window that works on a machine with no X display.
+
+    ``SetOffScreenRendering(1)`` does not stop the default X11 window from
+    opening a display connection, and VTK aborts the whole process ("bad X
+    server connection, DISPLAY=") when it cannot. So when DISPLAY is unset,
+    ask for an EGL or OSMesa window explicitly instead.
+    """
+    if os.environ.get("DISPLAY"):
+        return vtk.vtkRenderWindow()
+    errors = []
+    for class_name in ("vtkEGLRenderWindow", "vtkOSOpenGLRenderWindow"):
+        window_cls = getattr(vtk, class_name, None)
+        if window_cls is None:
+            continue
+        try:
+            return window_cls()
+        except Exception as exc:  # noqa: BLE001 - report every backend tried.
+            errors.append(f"{class_name}: {type(exc).__name__}: {exc}")
+    detail = "; ".join(errors) or "this VTK build has no EGL or OSMesa window"
+    raise RuntimeError(
+        "cannot render off-screen: DISPLAY is unset and " + detail + ". "
+        "Run under `xvfb-run -a`, or install a headless VTK build (vtk-osmesa)."
+    )
+
+
 def _render_one_view(verts, tris, front, color_rgb01, img_size=256):
     """One off-screen VTK render → PIL Image."""
     import vtk
@@ -104,7 +131,7 @@ def _render_one_view(verts, tris, front, color_rgb01, img_size=256):
     cam = ren.GetActiveCamera()
     cam.SetPosition(*eye); cam.SetFocalPoint(*LOOKAT); cam.SetViewUp(*true_up)
     cam.ParallelProjectionOn(); cam.SetParallelScale(0.55)
-    win = vtk.vtkRenderWindow(); win.SetOffScreenRendering(1); win.SetSize(img_size, img_size); win.AddRenderer(ren)
+    win = _offscreen_render_window(vtk); win.SetOffScreenRendering(1); win.SetSize(img_size, img_size); win.AddRenderer(ren)
     win.Render()
     w2i = vtk.vtkWindowToImageFilter(); w2i.SetInput(win); w2i.Update()
     img = w2i.GetOutput()
